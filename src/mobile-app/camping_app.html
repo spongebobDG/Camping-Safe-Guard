@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>캠핑 세이프 가드</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 400px; margin: 0 auto; background: white; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: #2c3e50; color: white; padding: 20px; text-align: center; }
+        .header h2 { margin: 0; font-size: 1.2rem; }
+        .status-bar { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: #ecf0f1; font-size: 0.9rem; }
+        .btn { padding: 8px 12px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .btn-connect { background: #3498db; color: white; }
+        .btn-disconnect { background: #e74c3c; color: white; display: none; }
+        .state-banner { text-align: center; padding: 15px; font-size: 1.2rem; font-weight: bold; background: #2ecc71; color: white; transition: background 0.3s; }
+        .state-banner.danger { background: #e74c3c; }
+        .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 20px; }
+        .card { background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #dee2e6; }
+        .card h3 { margin: 0 0 10px 0; font-size: 0.9rem; color: #7f8c8d; }
+        .card .value { font-size: 1.4rem; font-weight: bold; margin-bottom: 5px; }
+        .card .sub { font-size: 0.75rem; color: #95a5a6; }
+        .controls { padding: 20px; border-top: 1px solid #eee; }
+        .btn-control { width: 100%; padding: 15px; margin-bottom: 10px; font-size: 1rem; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; color: white; }
+        .btn-open { background: #f39c12; }
+        .btn-mute { background: #7f8c8d; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h2>⛺ 캠핑 세이프 가드 (v1.0)</h2>
+    </div>
+    
+    <div class="status-bar">
+        <span id="ble-status">⚪ 상태: 연결 끊김</span>
+        <button id="btn-connect" class="btn btn-connect">기기 찾기</button>
+        <button id="btn-disconnect" class="btn btn-disconnect">연결 해제</button>
+    </div>
+
+    <div id="state-banner" class="state-banner">
+        ✅ 현재 상태: 안전
+    </div>
+
+    <div class="dashboard">
+        <div class="card">
+            <h3>일산화탄소(CO)</h3>
+            <div id="val-co" class="value">0 Raw</div>
+            <div id="val-base" class="sub">(기준: --)</div>
+        </div>
+        <div class="card">
+            <h3>이산화탄소(CO2)</h3>
+            <div id="val-co2" class="value">0 ppm</div>
+            <div class="sub">(안전 수치)</div>
+        </div>
+        <div class="card">
+            <h3>텐트 내부 온도</h3>
+            <div id="val-temp" class="value">0.0 °C</div>
+        </div>
+        <div class="card">
+            <h3>텐트 내부 습도</h3>
+            <div id="val-hum" class="value">0.0 %</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="btn-open" class="btn-control btn-open">🔓 텐트 지퍼 강제 개방</button>
+        <button id="btn-mute" class="btn-control btn-mute">🔕 경보음 5분간 음소거</button>
+    </div>
+</div>
+
+<script>
+    // BLE UUIDs (ESP32 코드와 동일해야 함)
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHARACTERISTIC_TX_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"; // ESP32 -> Phone
+    const CHARACTERISTIC_RX_UUID = "8a798533-c917-48f5-a7b6-3c224f8d689b"; // Phone -> ESP32
+
+    let bleDevice;
+    let rxCharacteristic;
+
+    const btnConnect = document.getElementById('btn-connect');
+    const btnDisconnect = document.getElementById('btn-disconnect');
+    const bleStatus = document.getElementById('ble-status');
+    const stateBanner = document.getElementById('state-banner');
+
+    btnConnect.addEventListener('click', connectBLE);
+    btnDisconnect.addEventListener('click', disconnectBLE);
+
+    document.getElementById('btn-open').addEventListener('click', () => sendCommand("OPEN"));
+    document.getElementById('btn-mute').addEventListener('click', () => sendCommand("MUTE"));
+
+    async function connectBLE() {
+        try {
+            bleStatus.innerText = "🟡 기기 찾는 중...";
+            bleDevice = await navigator.bluetooth.requestDevice({
+                filters: [{ name: "CampingSafeGuard" }],
+                optionalServices: [SERVICE_UUID]
+            });
+
+            bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+            const server = await bleDevice.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            
+            // 데이터 수신 (TX)
+            const txCharacteristic = await service.getCharacteristic(CHARACTERISTIC_TX_UUID);
+            await txCharacteristic.startNotifications();
+            txCharacteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+
+            // 명령어 송신 (RX)
+            rxCharacteristic = await service.getCharacteristic(CHARACTERISTIC_RX_UUID);
+
+            bleStatus.innerText = "🟢 상태: 연결됨";
+            btnConnect.style.display = 'none';
+            btnDisconnect.style.display = 'block';
+
+        } catch (error) {
+            console.error("BLE 연결 실패:", error);
+            bleStatus.innerText = "🔴 연결 실패";
+        }
+    }
+
+    function onDisconnected() {
+        bleStatus.innerText = "⚪ 상태: 연결 끊김";
+        btnConnect.style.display = 'block';
+        btnDisconnect.style.display = 'none';
+    }
+
+    function disconnectBLE() {
+        if (bleDevice && bleDevice.gatt.connected) {
+            bleDevice.gatt.disconnect();
+        }
+    }
+
+    // ESP32에서 보낸 데이터(예: "906,0,24.5,45.0,SAFE,913")를 처리
+    function handleNotifications(event) {
+        let value = new TextDecoder().decode(event.target.value);
+        let data = value.split(",");
+        
+        if(data.length >= 6) {
+            document.getElementById('val-co').innerText = data[0] + " Raw";
+            document.getElementById('val-co2').innerText = data[1] + " ppm";
+            document.getElementById('val-temp').innerText = data[2] + " °C";
+            document.getElementById('val-hum').innerText = data[3] + " %";
+            
+            let state = data[4];
+            document.getElementById('val-base').innerText = "(기준: " + data[5] + ")";
+
+            if (state === "DANGER") {
+                stateBanner.className = "state-banner danger";
+                stateBanner.innerText = "⚠️ 현재 상태: 위험 (개방 요망)";
+            } else {
+                stateBanner.className = "state-banner";
+                stateBanner.innerText = "✅ 현재 상태: 안전";
+            }
+        }
+    }
+
+    async function sendCommand(cmd) {
+        if (!rxCharacteristic) {
+            alert("블루투스가 연결되어 있지 않습니다.");
+            return;
+        }
+        let encoder = new TextEncoder();
+        await rxCharacteristic.writeValue(encoder.encode(cmd));
+        alert(cmd + " 명령을 전송했습니다.");
+    }
+</script>
+</body>
+</html>
